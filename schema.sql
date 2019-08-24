@@ -48,7 +48,7 @@ CREATE TABLE movies (
   image_url VARCHAR(1000),
   popularity NUMERIC(8, 4),
   released_on CHAR(10),
-  region_code CHAR(2) NOT NULL,
+  query VARCHAR(255) NOT NULL,
   created_at BIGINT
 );
 
