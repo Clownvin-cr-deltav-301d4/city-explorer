@@ -124,17 +124,17 @@
   }
 
   function handleMoviesRoute(request, response) {
-    forRequest(request, response).selectFrom('movies').where('region_code').are(request.query.data.region_code).then(
-      () => onMoviesMiss(request.query.data, response),
+    forRequest(request, response).selectFrom('movies').where('query').are(request.query.data.search_query).then(
+      onMoviesMiss,
       onMoviesHit
     );
   }
 
-  function onMoviesMiss(location, response) {
+  function onMoviesMiss(request, response) {
     superagent
-      .get(`https://api.themoviedb.org/3/discover/movie?api_key=${process.env.MOVIEDB_API_KEY}&region=${location.region_code}&page=1&sort_by=popularity.desc`)
+      .get(`https://api.themoviedb.org/3/search/movie?api_key=${process.env.MOVIEDB_API_KEY}&language=en-US&page=1&query=${request.query.data.search_query}`)
       .then(movieData => {
-        const movies = movieData.body.results.map(movieInfo => new Movie(location.region_code, movieInfo));
+        const movies = movieData.body.results.map(movieInfo => new Movie(request.query.data.search_query, movieInfo));
         movies.forEach(movie => movie.save());
         response.send(movies);
       })
@@ -144,7 +144,7 @@
   function onMoviesHit(results, request, response) {
     if (Number(results.rows[0].created_at) + CACHE_MAX_AGE.MOVIES < Date.now()) {
       console.log('Clearing Movie cache...');
-      deleteFrom('movies').where('region_code').are(results.rows[0].region_code).then(() => onMoviesMiss(request.query.data, response));
+      deleteFrom('movies').where('query').are(results.rows[0].query).then(() => onMoviesMiss(request, response));
     } else {
       response.send(results.rows);
     }
@@ -152,17 +152,17 @@
 
   function handleEventsRoute(request, response) {
     forRequest(request, response).selectFrom('events').where('location_id').are(request.query.data.id).then(
-      () => onEventsMiss(request.query.data, response),
+      onEventsMiss,
       onEventsHit
     );
   }
 
-  function onEventsMiss(location, response) {
+  function onEventsMiss(request, response) {
     superagent
-      .get(`https://www.eventbriteapi.com/v3/events/search/?token=${process.env.EVENTBRITE_API_KEY}&location.latitude=${location.latitude}&location.longitude=${location.longitude}&location.within=10km`)
+      .get(`https://www.eventbriteapi.com/v3/events/search/?token=${process.env.EVENTBRITE_API_KEY}&location.latitude=${request.query.data.latitude}&location.longitude=${request.query.data.longitude}&location.within=10km`)
       .then(eventData => {
         const sliceIndex = eventData.body.events.length > 20 ? 20 : eventData.body.events.length;
-        const events = eventData.body.events.slice(0, sliceIndex).map(event => new Event(location.id, event));
+        const events = eventData.body.events.slice(0, sliceIndex).map(event => new Event(request.query.data.id, event));
         events.forEach(event => event.save());
         response.send(events);
       })
@@ -172,7 +172,7 @@
   function onEventsHit(results, request, response) {
     if (Number(results.rows[0].created_at) + CACHE_MAX_AGE.EVENTS < Date.now()) {
       console.log('Clearing Events cache...');
-      deleteFrom('events').where('location_id').are(results.rows[0].location_id).then(() => onEventsMiss(request.query.data, response));
+      deleteFrom('events').where('location_id').are(results.rows[0].location_id).then(() => onEventsMiss(request, response));
     } else {
       response.send(results.rows);
     }
@@ -245,8 +245,8 @@
     insertInto('events', this);
   };
 
-  function Movie(regionCode, movieData) {
-    this.region_code = regionCode;
+  function Movie(query, movieData) {
+    this.query = query;
     this.title = movieData.title;
     this.overview = movieData.overview;
     this.average_votes = movieData.vote_average;
