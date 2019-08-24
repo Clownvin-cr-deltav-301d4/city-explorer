@@ -1,9 +1,11 @@
+
 DROP TABLE IF EXISTS locations, weather, events, yelps, movies, trails CASCADE;
 
 CREATE TABLE locations (
   id SERIAL PRIMARY KEY,
   search_query VARCHAR(255),
   formatted_query VARCHAR(255),
+
   latitude NUMERIC(20, 14),
   longitude NUMERIC(20, 14),
   region_code CHAR(2),
@@ -23,7 +25,9 @@ CREATE TABLE events (
   name VARCHAR(255),
   event_date VARCHAR(255),
   link VARCHAR(255),
+
   summary VARCHAR(10000),
+
   location_id INTEGER NOT NULL REFERENCES locations(id),
   created_at BIGINT
 );
