@@ -5,10 +5,8 @@ CREATE TABLE locations (
   id SERIAL PRIMARY KEY,
   search_query VARCHAR(255),
   formatted_query VARCHAR(255),
-
   latitude NUMERIC(20, 14),
   longitude NUMERIC(20, 14),
-  region_code CHAR(2),
   created_at BIGINT
 );
 
@@ -25,9 +23,7 @@ CREATE TABLE events (
   name VARCHAR(255),
   event_date VARCHAR(255),
   link VARCHAR(255),
-
   summary VARCHAR(10000),
-
   location_id INTEGER NOT NULL REFERENCES locations(id),
   created_at BIGINT
 );
@@ -52,7 +48,7 @@ CREATE TABLE movies (
   image_url VARCHAR(1000),
   popularity NUMERIC(8, 4),
   released_on CHAR(10),
-  region_code CHAR(2) NOT NULL,
+  query VARCHAR(255) NOT NULL,
   created_at BIGINT
 );
 
