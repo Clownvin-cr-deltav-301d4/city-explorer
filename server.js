@@ -20,197 +20,191 @@
     TRAILS: 60000
   };
 
-  app.get('/location', handleLocationRoute);
-
-  app.get('/events', handleEventsRoute);
-
-  app.get('/weather', handleWeatherRoute);
-
-  app.get('/movies', handleMoviesRoute);
-
-  app.get('/yelp', handleYelpRoute);
-
-  app.get('/trails', handleTrailsRoute);
-
-  app.get('*', (req, res) => {
-    res.status(404).send({ status: 404, responseText: 'This item could not be found...' });
-  });
-
-  const PORT = process.env.PORT || 3000;
-  app.listen(PORT, () => {
-    console.log('I know that you came to party baby, baby, baby, baby');
-  });
-
-  //Functions below.
-
-  function handleTrailsRoute(request, response) {
-    forRequest(request, response).selectFrom('trails').where('location_id').are(request.query.data.id).then(
-      onTrailsMiss,
-      onTrailsHit
-    );
+  function convertTime(timeInMilliseconds) {
+    return new Date(timeInMilliseconds).toString().split(' ').slice(0, 4).join(' ');
   }
 
-  function onTrailsMiss(request, response) {
-    superagent.get(`https://www.hikingproject.com/data/get-trails?lat=${request.query.data.latitude}&lon=${request.query.data.longitude}&maxDistance=10&key=${process.env.TRAILS_API_KEY}`)
-      .then(trailsData => {
-        const trails = trailsData.body.trails.map(trail => new Trail(request.query.data.id, trail));
-        trails.forEach(trail => trail.save());
-        response.send(trails);
-      })
-      .catch(getErrorHandler(response));
+  function handleError(error, response) {
+    response.status(error.status || 500).send(error.message);
   }
 
-  function onTrailsHit(results, request, response) {
-    if (Number(results.rows[0].created_at) + CACHE_MAX_AGE.TRAILS < Date.now()) {
-      console.log('Clearing trails cache');
-      deleteFrom('trails').where('location_id').are(results.rows[0].location_id).then(() => onTrailsMiss(request, response));
-    } else {
-      response.send(results.rows);
-    }
+  function getErrorHandler(response) {
+    return (error) => handleError(error, response);
   }
 
-  function handleLocationRoute(request, response) {
-    forRequest(request, response).selectFrom('locations').where('search_query').are(request.query.data).then(
-      onLocationMiss,
-      onLocationHit
-    );
-  }
+  //Major functionality...
 
-  function onLocationHit(results, request, response) {
-    response.send(results.rows[0]);
-  }
+  /*
+    Check out these functional APIs!
+    They're nested to all hell, but meh. It'd be even longer without the nesting.
 
-  function onLocationMiss(request, response) {
-    superagent.get(`https://maps.googleapis.com/maps/api/geocode/json?address=${request.query.data}&key=${process.env.GEOCODE_API_KEY}`)
-      .then(locationData => {
-        let region_code = 'US';
-        for (const addr of locationData.body.results[0].address_components) {
-          if (addr.types.includes('country')) {
-            region_code = addr.short_name;
-            break;
+    Would be neat to actually discuss how to build functional APIs like this, so that I'm not
+    just taking shots in the dark at the format.
+  */
+  function when(path) {
+    return {
+      selectFrom: function (table) {
+        return {
+          where: function (...columns) {
+            let sql = `SELECT * FROM ${table} WHERE `;
+            for (let i = 0; i < columns.length; i++) {
+              sql += `${columns[i]}=$${i + 1}`;
+              if (i + 1 < columns.length) {
+                sql += ' AND ';
+              }
+            }
+            sql += ';';
+            return {
+              are: function (...values) {
+                return {
+                  then: function (onHit) {
+                    return {
+                      else: function (onMiss) {
+                        app
+                          .get(path, (request, response) => {
+                            let currValues = typeof values[0] === 'function' ? values[0](request) : values;
+                            if (!Array.isArray(currValues)) {
+                              currValues = [currValues];
+                            }
+                            client
+                              .query(sql, currValues)
+                              .then(recieved => {
+                                if (recieved.rows.length === 0) {
+                                  onMiss(request, response);
+                                } else {
+                                  onHit(recieved, response, request);
+                                }
+                              })
+                              .catch(getErrorHandler(response));
+                          });
+                      }
+                    };
+                  }
+                };
+              }
+            };
           }
-        }
-        const location = new Location(request.query.data, locationData.body.results[0].formatted_address, locationData.body.results[0].geometry.location.lat, locationData.body.results[0].geometry.location.lng, region_code);
-        location.save().then(location => response.send(location));
-      })
-      .catch(getErrorHandler(response));
+        };
+      }
+    };
   }
 
-  function handleYelpRoute(request, response) {
-    forRequest(request, response).selectFrom('yelps').where('location_id').are(request.query.data.id).then(
-      onYelpMiss,
-      onYelpHit
-    );
+  function onHit() {
+    return {
+      ifOlderThan: function (maxAge) {
+        this.maxAge = maxAge;
+        const outer = this;
+        return {
+          deleteFrom: function (table) {
+            outer.table = table;
+            return {
+              where: function (...columns) {
+                outer.sql = `DELETE FROM ${outer.table} WHERE `;
+                for (let i = 0; i < columns.length; i++) {
+                  outer.sql += `${columns[i]}=$${i + 1}`;
+                  if (i + 1 < columns.length) {
+                    outer.sql += ' AND ';
+                  }
+                }
+                outer.sql += ';';
+                return {
+                  are: function (...values) {
+                    outer.values = values;
+                    return {
+                      then: function (callback) {
+                        outer.onMiss = callback;
+                        return outer;
+                      }
+                    };
+                  }
+                };
+              }
+            };
+          }
+        };
+      },
+      send: function (rowIndex) {
+        const context = this;
+        return function (results, response, request) {
+          if (context.maxAge && Number(results.rows[0].created_at) + context.maxAge < Date.now()) {
+            let values = typeof context.values[0] === 'function' ? context.values[0](request) : context.values;
+            if (!Array.isArray(values)) {
+              values = [values];
+            }
+            console.log(`Clearing ${context.table} cache...`);
+            client.query(context.sql, values)
+              .then(() => context.onMiss(request, response))
+              .catch(getErrorHandler(response));
+          } else if (rowIndex !== undefined) {
+            response.send(results.rows[rowIndex]);
+          } else {
+            response.send(results.rows);
+          }
+        };
+      }
+    };
   }
 
-  function onYelpMiss(request, response) {
-    superagent
-      .get(`https://api.yelp.com/v3/businesses/search?latitude=${request.query.data.latitude}&longitude=${request.query.data.longitude}`)
-      .set('Authorization', `Bearer ${process.env.YELP_API_KEY}`)
-      .then(yelpData => {
-        const biddnesses = yelpData.body.businesses.map(biddness => new YelpLocation(request.query.data.id, biddness));
-        biddnesses.forEach(biddness => biddness.save());
-        response.send(biddnesses);
-      });
+  function onMiss() {
+    return {
+      getUrlForRequest: function (urlBuilder) {
+        const headers = [];
+        return {
+          set: function (header, value) {
+            headers.push({ header: header, value: value });
+            return this;
+          },
+          then: function (responseParser) {
+            return function (request, response) {
+              const url = urlBuilder(request).replace(' ', '%20');
+              const pending = superagent.get(url);
+              headers.forEach(header => pending.set(header.header, header.value));
+              pending.then(responseData => {
+                const parsed = responseParser(responseData, request);
+                if (Array.isArray(parsed)) {
+                  parsed.forEach(result => result.save());
+                  response.send(parsed);
+                } else {
+                  parsed.save().then((newVal) => response.send(newVal));
+                }
+              })
+                .catch(getErrorHandler(response));
+            };
+          }
+        };
+      }
+    };
   }
 
-  function onYelpHit(results, request, response) {
-    if (Number(results.rows[0].created_at) + CACHE_MAX_AGE.YELPS < Date.now()) {
-      console.log('Clearing yelp cache');
-      deleteFrom('yelps').where('location_id').are(results.rows[0].location_id).then(() => onYelpMiss(request, response));
-    } else {
-      response.send(results.rows);
+  const insertInto = (table, object, extra, onResults) => {
+    const columns = [...Object.keys(object), 'created_at'];
+    const values = [...Object.values(object), Date.now()];
+    let valueReplacer = '$1';
+    for (let i = 1; i < values.length; i++) {
+      valueReplacer += `, $${i + 1}`;
     }
-  }
-
-  function handleMoviesRoute(request, response) {
-    forRequest(request, response).selectFrom('movies').where('query').are(request.query.data.search_query).then(
-      onMoviesMiss,
-      onMoviesHit
-    );
-  }
-
-  function onMoviesMiss(request, response) {
-    superagent
-      .get(`https://api.themoviedb.org/3/search/movie?api_key=${process.env.MOVIEDB_API_KEY}&language=en-US&page=1&query=${request.query.data.search_query}`)
-      .then(movieData => {
-        const movies = movieData.body.results.map(movieInfo => new Movie(request.query.data.search_query, movieInfo));
-        movies.forEach(movie => movie.save());
-        response.send(movies);
-      })
-      .catch(getErrorHandler(response));
-  }
-
-  function onMoviesHit(results, request, response) {
-    if (Number(results.rows[0].created_at) + CACHE_MAX_AGE.MOVIES < Date.now()) {
-      console.log('Clearing Movie cache...');
-      deleteFrom('movies').where('query').are(results.rows[0].query).then(() => onMoviesMiss(request, response));
-    } else {
-      response.send(results.rows);
+    let sql = `INSERT INTO ${table} (${columns}) VALUES(${valueReplacer}) ON CONFLICT DO NOTHING`;
+    if (extra) {
+      sql += ` ${extra}`;
     }
-  }
-
-  function handleEventsRoute(request, response) {
-    forRequest(request, response).selectFrom('events').where('location_id').are(request.query.data.id).then(
-      onEventsMiss,
-      onEventsHit
-    );
-  }
-
-  function onEventsMiss(request, response) {
-    superagent
-      .get(`https://www.eventbriteapi.com/v3/events/search/?token=${process.env.EVENTBRITE_API_KEY}&location.latitude=${request.query.data.latitude}&location.longitude=${request.query.data.longitude}&location.within=10km`)
-      .then(eventData => {
-        const sliceIndex = eventData.body.events.length > 20 ? 20 : eventData.body.events.length;
-        const events = eventData.body.events.slice(0, sliceIndex).map(event => new Event(request.query.data.id, event));
-        events.forEach(event => event.save());
-        response.send(events);
-      })
-      .catch(getErrorHandler(response));
-  }
-
-  function onEventsHit(results, request, response) {
-    if (Number(results.rows[0].created_at) + CACHE_MAX_AGE.EVENTS < Date.now()) {
-      console.log('Clearing Events cache...');
-      deleteFrom('events').where('location_id').are(results.rows[0].location_id).then(() => onEventsMiss(request, response));
-    } else {
-      response.send(results.rows);
+    sql = `${sql};`;
+    const pending = client.query(sql, values).catch(error => {
+      console.log(`We seem to have encountered a bug: ${error}`);
+      console.log(values);
+    });
+    if (onResults) {
+      return pending.then(onResults);
     }
-  }
+    return pending;
+  };
 
-  function handleWeatherRoute(request, response) {
-    forRequest(request, response).selectFrom('weather').where('location_id').are(request.query.data.id).then(
-      () => onWeatherMiss(request.query.data, response),
-      onWeatherHit
-    );
-  }
+  //Constructors
 
-  function onWeatherMiss(location, response) {
-    superagent
-      .get(`https://api.darksky.net/forecast/${process.env.DARKSKY_API_KEY}/${location.latitude},${location.longitude}`)
-      .then(weatherData => {
-        const weather = weatherData.body.daily.data.map(day => new Weather(location.id, day));
-        weather.forEach(day => day.save());
-        response.send(weather);
-      })
-      .catch(getErrorHandler(response));
-  }
-
-  function onWeatherHit(results, request, response) {
-    if (Number(results.rows[0].created_at) + CACHE_MAX_AGE.WEATHER < Date.now()) {
-      console.log('Clearing Weather cache...');
-      deleteFrom('weather').where('location_id').are(results.rows[0].location_id).then(() => onWeatherMiss(request.query.data, response));
-    } else {
-      response.send(results.rows);
-    }
-  }
-
-  function Location(query, formatted, lat, long, region_code) {
+  function Location(query, formatted, lat, long) {
     this.search_query = query;
     this.formatted_query = formatted;
     this.latitude = lat;
     this.longitude = long;
-    this.region_code = region_code;
   }
 
   Location.prototype.save = function () {
@@ -236,13 +230,26 @@
     this.name = eventData.name.text ? eventData.name.text : eventData.name;
     this.event_date = eventData.start ? eventData.start.local : eventData.event_date;
     this.summary = eventData.description ? eventData.description.text : eventData.summary;
-    if (this.summary.length > 10000) {
+    if (this.summary && this.summary.length > 10000) {
       this.summary = `${this.summary.slice(0, 9997)}...`;
     }
   }
 
   Event.prototype.save = function () {
     insertInto('events', this);
+  };
+
+  function YelpLocation(locationId, yelpData) {
+    this.location_id = locationId;
+    this.name = yelpData.name;
+    this.image_url = yelpData.image_url;
+    this.price = yelpData.price;
+    this.rating = yelpData.rating;
+    this.url = yelpData.url;
+  }
+
+  YelpLocation.prototype.save = function () {
+    insertInto('yelps', this);
   };
 
   function Movie(query, movieData) {
@@ -258,19 +265,6 @@
 
   Movie.prototype.save = function () {
     insertInto('movies', this);
-  };
-
-  function YelpLocation(locationId, yelpData) {
-    this.location_id = locationId;
-    this.name = yelpData.name;
-    this.image_url = yelpData.image_url;
-    this.price = yelpData.price;
-    this.rating = yelpData.rating;
-    this.url = yelpData.url;
-  }
-
-  YelpLocation.prototype.save = function () {
-    insertInto('yelps', this);
   };
 
   function Trail(locationId, trailData) {
@@ -290,89 +284,92 @@
 
   Trail.prototype.save = function () {
     insertInto('trails', this);
-  }
-
-  function convertTime(timeInMilliseconds) {
-    return new Date(timeInMilliseconds).toString().split(' ').slice(0, 4).join(' ');
-  }
-
-  function handleError(error, response) {
-    response.status(error.status || 500).send(error.message);
-  }
-
-  function getErrorHandler(response) {
-    return (error) => handleError(error, response);
-  }
-
-  const insertInto = (table, object, extra, onResults) => {
-    const columns = [...Object.keys(object), 'created_at'];
-    const values = [...Object.values(object), Date.now()];
-    let valueReplacer = '$1';
-    for (let i = 1; i < values.length; i++) {
-      valueReplacer += `, $${i + 1}`;
-    }
-    let sql = `INSERT INTO ${table} (${columns}) VALUES(${valueReplacer}) ON CONFLICT DO NOTHING`;
-    if (extra) {
-      sql += ` ${extra}`;
-    }
-    sql = `${sql};`;
-    if (onResults) {
-      return client.query(sql, values).then(onResults);
-    }
-    client.query(sql, values).catch(error => {
-      console.log(`We seem to have encountered a bug: ${error}`);
-      console.log(values);
-    });
   };
 
-  const deleteFrom = (table) => ({
-    where: (...columns) => ({
-      are: (...values) => {
-        let sql = `DELETE FROM ${table} WHERE `;
-        for (let i = 0; i < columns.length; i++) {
-          sql += `${columns[i]}=$${i + 1}`;
-          if (i + 1 < columns.length) {
-            sql += ' AND ';
-          }
-        }
-        sql += ';';
-        return client.query(sql, values).catch(error => {
-          console.log(`We seem to have encountered a bug: ${error}`);
-          console.log(values);
-        });
-      },
-    }),
+  // Cache hit/miss functions
+  // Note that there is most definitely a way to get these onMiss/onHits to fit inside their "when" declarations.
+  // The only problem, currently, is that it's hard to reference the "onMiss" inside of "onHit", if they are declared inside of "when"
+  // A solution I was attempting was to bind onMiss and onHit to the "this" of the "when", and then they could reference eachother through
+  // this.onHit and this.onMiss, but this would require yet another callback as they are not bound until after when...else.
+
+  const onLocationMiss = onMiss()
+    .getUrlForRequest(request => `https://maps.googleapis.com/maps/api/geocode/json?address=${request.query.data}&key=${process.env.GEOCODE_API_KEY}`)
+    .then((response, request) => new Location(request.query.data, response.body.results[0].formatted_address, response.body.results[0].geometry.location.lat, response.body.results[0].geometry.location.lng));
+
+  const onLocationHit = onHit().send(0);
+
+  const onWeatherMiss = onMiss()
+    .getUrlForRequest(request => `https://api.darksky.net/forecast/${process.env.DARKSKY_API_KEY}/${request.query.data.latitude},${request.query.data.longitude}`)
+    .then((response, request) => response.body.daily.data.map(day => new Weather(request.query.data.id, day)));
+
+  const onWeatherHit = onHit().ifOlderThan(CACHE_MAX_AGE.WEATHER).deleteFrom('weather').where('location_id').are((request) => request.query.data.id)
+    .then(onWeatherMiss).send();
+
+  const onEventsMiss = onMiss()
+    .getUrlForRequest(request => `https://www.eventbriteapi.com/v3/events/search/?token=${process.env.EVENTBRITE_API_KEY}&location.latitude=${request.query.data.latitude}&location.longitude=${request.query.data.longitude}&location.within=10km`)
+    .then((response, request) => {
+      const sliceIndex = response.body.events.length > 20 ? 20 : response.body.events.length;
+      const events = response.body.events.slice(0, sliceIndex).map(event => new Event(request.query.data.id, event));
+      return events;
+    });
+
+  const onEventsHit = onHit().ifOlderThan(CACHE_MAX_AGE.EVENTS).deleteFrom('events').where('location_id').are((request) => request.query.data.id)
+    .then(onEventsMiss).send();
+
+  const onMoviesMiss = onMiss()
+    .getUrlForRequest(request => `https://api.themoviedb.org/3/search/movie?api_key=${process.env.MOVIEDB_API_KEY}&language=en-US&page=1&query=${request.query.data.search_query}`)
+    .then((response, request) => response.body.results.map(movie => new Movie(request.query.data.search_query, movie)));
+
+  const onMoviesHit = onHit().ifOlderThan(CACHE_MAX_AGE.MOVIES).deleteFrom('movies').where('query').are((request) => request.query.data.search_query)
+    .then(onMoviesMiss).send();
+
+  const onYelpMiss = onMiss()
+    .getUrlForRequest((request) => `https://api.yelp.com/v3/businesses/search?latitude=${request.query.data.latitude}&longitude=${request.query.data.longitude}`)
+    .set('Authorization', `Bearer ${process.env.YELP_API_KEY}`)
+    .then((response, request) => response.body.businesses.map(business => new YelpLocation(request.query.data.id, business)));
+
+  const onYelpHit = onHit().ifOlderThan(CACHE_MAX_AGE.YELPS).deleteFrom('yelps').where('location_id').are((request) => request.query.data.id)
+    .then(onYelpMiss).send();
+
+  const onTrailsMiss = onMiss()
+    .getUrlForRequest(request => `https://www.hikingproject.com/data/get-trails?lat=${request.query.data.latitude}&lon=${request.query.data.longitude}&maxDistance=10&key=${process.env.TRAILS_API_KEY}`)
+    .then((response, request) => response.body.trails.map(trail => new Trail(request.query.data.id, trail)));
+
+  const onTrailsHit = onHit().ifOlderThan(CACHE_MAX_AGE.TRAILS).deleteFrom('trails').where('location_id').are((request) => request.query.data.id)
+    .then(onTrailsMiss).send();
+
+  //Routes
+
+  when('/location').selectFrom('locations').where('search_query').are((request) => request.query.data)
+    .then(onLocationHit)
+    .else(onLocationMiss);
+
+  when('/weather').selectFrom('weather').where('location_id').are((request) => request.query.data.id)
+    .then(onWeatherHit)
+    .else(onWeatherMiss);
+
+  when('/events').selectFrom('events').where('location_id').are((request) => request.query.data.id)
+    .then(onEventsHit)
+    .else(onEventsMiss);
+
+  when('/movies').selectFrom('movies').where('query').are((request) => request.query.data.search_query)
+    .then(onMoviesHit)
+    .else(onMoviesMiss);
+
+  when('/yelp').selectFrom('yelps').where('location_id').are((request) => request.query.data.id)
+    .then(onYelpHit)
+    .else(onYelpMiss);
+
+  when('/trails').selectFrom('trails').where('location_id').are((request) => request.query.data.id)
+    .then(onTrailsHit)
+    .else(onTrailsMiss);
+
+  app.get('*', (req, res) => {
+    res.status(404).send({ status: 404, responseText: 'This item could not be found...' });
   });
 
-  const forRequest = (request, response) => ({
-    selectFrom: (table) => ({
-      where: (...columns) => ({
-        are: (...values) => {
-          let sql = `SELECT * FROM ${table} WHERE `;
-          for (let i = 0; i < columns.length; i++) {
-            sql += `${columns[i]}=$${i + 1}`;
-            if (i + 1 < columns.length) {
-              sql += ' AND ';
-            }
-          }
-          sql += ';';
-          const pending = client.query(sql, values).catch(error => {
-            console.log(`We seem to have encountered a bug: ${error}`);
-            console.log(values);
-          });
-          return {
-            then: function (onMiss, onHit) {
-              pending.then(recieved => {
-                if (recieved.rows.length === 0) {
-                  onMiss(request, response);
-                } else {
-                  onHit(recieved, request, response);
-                }
-              });
-            }
-          };
-        }
-      }),
-    }),
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => {
+    console.log(`Listening for requests on port: ${PORT}`);
   });
 })();
