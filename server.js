@@ -47,12 +47,12 @@
         return {
           where: function (...columns) {
             let sql = `SELECT * FROM ${table} WHERE `;
-            for (let i = 0; i < columns.length; i++) {
-              sql += `${columns[i]}=$${i + 1}`;
-              if (i + 1 < columns.length) {
+            columns.forEach((column, index) => {
+              sql += `${column}=$${index + 1}`;
+              if (index + 1 < columns.length) {
                 sql += ' AND ';
               }
-            }
+            });
             sql += ';';
             return {
               are: function (...values) {
@@ -100,12 +100,12 @@
             return {
               where: function (...columns) {
                 outer.sql = `DELETE FROM ${outer.table} WHERE `;
-                for (let i = 0; i < columns.length; i++) {
-                  outer.sql += `${columns[i]}=$${i + 1}`;
-                  if (i + 1 < columns.length) {
+                columns.forEach((column, index) => {
+                  outer.sql += `${column}=$${index + 1}`;
+                  if (index + 1 < columns.length) {
                     outer.sql += ' AND ';
                   }
-                }
+                });
                 outer.sql += ';';
                 return {
                   are: function (...values) {
